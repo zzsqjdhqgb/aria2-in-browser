@@ -1,0 +1,50 @@
+# =============================================================================
+# DSH container - compose exists only to hold what would otherwise be repeated
+# in every bat: the port mapping, the volume mounts and the environment file.
+#
+# There is deliberately NO "command:" on the service. The container starts with
+# the image's default CMD (bash), and the docker-*.bat files pass the real
+# command, for example:
+#   docker compose run --rm dev bash
+#   docker compose run --rm --service-ports dev bash /workspace/.env/sh/dsh.sh
+#
+# context: ..  ->  the repository root (aria2-in-browser), so the bind mount and
+# the build context cover the whole repo, not .env/ alone.
+# =============================================================================
+
+name: dsh-dev
+
+services:
+  dev:
+    build:
+      context: ..
+      dockerfile: .env/Dockerfile
+    image: dsh-dev:local
+    working_dir: /workspace
+    stdin_open: true   # -i
+    tty: true          # -t, needed by the dsh terminal UI and bash
+    env_file:
+      - .env           # TZ plus any uncommented *_API_KEY (relative to this file)
+    ports:
+      # Published only with "docker compose run --service-ports" (used by
+      # docker-dsh.bat). The container port is the socat relay in sh/dsh.sh.
+      - "${DSH_WEB_PORT:-3080}:3080"
+    volumes:
+      # The whole repository, so host edits are visible in the container instantly
+      - ..:/workspace
+      # Keeps the host's node_modules out of the picture. The image installs
+      # nothing, so this volume starts empty: run "yarn install" inside the
+      # container once, and the result lands here instead of on the Windows host.
+      - dsh-node-modules:/workspace/node_modules
+      # $DSH_HOME is persisted: credentials, settings.yaml, profiles and plugins
+      # survive container recreation
+      - dsh-home:/home/dsh/.dsh
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+# The two data volumes: the only things meant to outlive a container.
+# With "name: dsh-dev" above they are dsh-dev_dsh-home and
+# dsh-dev_dsh-node-modules (see "docker volume ls").
+volumes:
+  dsh-home:
+  dsh-node-modules:

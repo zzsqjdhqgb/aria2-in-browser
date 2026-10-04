@@ -1,0 +1,5 @@
+# The variable file actually used on the host (may contain API keys): do not commit
+.env
+
+# env.example is the template and is meant to be committed
+!env.example
