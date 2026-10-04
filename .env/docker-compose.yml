@@ -32,13 +32,18 @@ services:
     volumes:
       # The whole repository, so host edits are visible in the container instantly
       - ..:/workspace
+      # .git is exposed READ-ONLY: the container can read history, status and
+      # diffs, but can never commit, branch, stage or rewrite the repository.
+      # Git operations belong on the host. Nested mounts such as this one and
+      # the node_modules volume below override the parent bind mount.
+      - ../.git:/workspace/.git:ro
       # Keeps the host's node_modules out of the picture. The image installs
       # nothing, so this volume starts empty: run "yarn install" inside the
       # container once, and the result lands here instead of on the Windows host.
       - dsh-node-modules:/workspace/node_modules
       # $DSH_HOME is persisted: credentials, settings.yaml, profiles and plugins
-      # survive container recreation
-      - dsh-home:/home/dsh/.dsh
+      # survive container recreation. The container runs as root, hence /root.
+      - dsh-home:/root/.dsh
     extra_hosts:
       - "host.docker.internal:host-gateway"
 

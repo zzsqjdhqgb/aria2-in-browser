@@ -10,8 +10,8 @@
 
 | 文件 | 作用 |
 |---|---|
-| `Dockerfile` | 工具镜像：Node 24 + dsh CLI + git/ripgrep/python3 + pnpm + yarn4 + socat，`CMD ["bash"]` |
-| `docker-compose.yml` | **只管端口映射、卷挂载、env_file**，单服务 `dev`，无 `command` |
+| `Dockerfile` | 工具镜像：Node 24 + dsh CLI + git/ripgrep/python3 + pnpm + yarn4 + socat，**以 root 运行**，`CMD ["bash"]` |
+| `docker-compose.yml` | **只管端口映射、卷挂载、env_file**，单服务 `dev`，无 `command`；并把 `.git` 以**只读**挂进容器 |
 | `docker-build.bat` | `docker compose ... build`，构建镜像 `dsh-dev:local` |
 | `docker-bash.bat` | `docker compose ... run --rm dev bash`，前台 bash 容器 |
 | `docker-dsh.bat` | 同上再加 `--service-ports`，启动 `sh/dsh.sh`（socat + dsh web），宿主访问 `http://localhost:3080` |
@@ -66,14 +66,31 @@ services:
     ports: ["${DSH_WEB_PORT:-3080}:3080"]              # 端口映射
     volumes:                                           # 卷挂载
       - ..:/workspace
+      - ../.git:/workspace/.git:ro                     # git 目录：只读
       - dsh-node-modules:/workspace/node_modules
-      - dsh-home:/home/dsh/.dsh
+      - dsh-home:/root/.dsh
     extra_hosts: ["host.docker.internal:host-gateway"]
 ```
 
 因此 bat 里不再出现任何 `-p` / `-v` / `-e`，只保留三件事：compose 文件位置、`--env-file`、以及要跑的命令。
 
 > `--env-file` 只影响 `${...}` 插值；变量真正进容器靠服务上的 `env_file: .env`。两者都指向同一个文件。
+
+## 容器内的 .git 是只读的
+
+`.git` 用 `../.git:/workspace/.git:ro` 单独覆盖挂载（嵌套挂载会盖住上面的 `..:/workspace`，机制和下面的 `node_modules` 卷一样），于是：
+
+| 命令 | 容器内 | 说明 |
+|---|---|---|
+| `git status` / `git log` / `git diff` / `git show` | 可用 | 只读查看，随便用 |
+| `git commit` / `git add` / `git branch` / `git checkout` / `git stash` | 失败 | 写 `.git` 被拒绝，**提交一律在宿主做** |
+
+配套两个设置，都已固化进镜像的 `Dockerfile`：
+
+- `GIT_OPTIONAL_LOCKS=0`：告诉 git 不要为了刷新 stat cache 去写 `.git/index`。没有它，`git status` 一般也能跑（git 会静默容忍写失败），但那是碰运气，加上才是确定的。
+- `git config --system --add safe.directory /workspace`：**兜底项**。容器现在跑 root、挂载也是 root 属主，这项检查本来就能过；留着是为了挂载带别的 uid 时（Linux 宿主，或 Docker Desktop 的非 root 映射）git 不会直接 `fatal: detected dubious ownership` 罢工。写在 `/etc/gitconfig`（镜像层）才能跨容器存活——写 `~/.gitconfig` 不行，`/root` 本身不是卷。
+
+想临时让容器内也能提交：把 `docker-compose.yml` 里 `../.git:/workspace/.git:ro` 那一行注释掉，重新起容器即可。
 
 ## 四个 bat 的细节
 
@@ -175,17 +192,18 @@ SILICONFLOW_API_KEY=sk-...
 OPENAI_API_KEY=sk-...
 ```
 
-`dsh` 的 home 解析顺序为：显式配置 > `$DSH_HOME` > `~/.dsh`。本环境显式把 `DSH_HOME` 设为 `/home/dsh/.dsh`，并挂到 `dsh-home` 卷。
+`dsh` 的 home 解析顺序为：显式配置 > `$DSH_HOME` > `~/.dsh`。本环境显式把 `DSH_HOME` 设为 `/root/.dsh`，并挂到 `dsh-home` 卷。
 
 ## 目录与卷的对应关系
 
 | 宿主 | 容器 | 说明 |
 |---|---|---|
 | 仓库根目录 | `/workspace` | bind mount，宿主改代码容器立刻可见（不是卷） |
+| 仓库根目录的 `.git` | `/workspace/.git` | **只读** bind mount，覆盖在上一条之上：可读历史与 diff，不能提交、切分支、改索引 |
 | 卷 `dsh-dev_dsh-node-modules` | `/workspace/node_modules` | 隔离宿主 `node_modules`：容器里 `yarn install` 的结果落在这里，不往 Windows 写 1.5 万个小文件 |
-| 卷 `dsh-dev_dsh-home` | `/home/dsh/.dsh` | 登录凭据、`settings.yaml`、profile、pnpm 装的插件 |
+| 卷 `dsh-dev_dsh-home` | `/root/.dsh` | 登录凭据、`settings.yaml`、profile、pnpm 装的插件 |
 
-容器内以非 root 用户 `dsh`（uid 1000）运行。`/workspace` 下文件属主跟随宿主；容器内新建的文件在 Windows 上看到属主是 root，属正常现象。
+容器内以 **root**（uid 0）运行：Dockerfile 里没有 `USER`，`HOME` 和 `DSH_HOME` 都在 `/root` 下。因此 yarn 的全局缓存是 `/root/.yarn/global`，而不是宿主项目里的 `.yarn/`。在 Linux 宿主上，容器里新建的文件属主会是 root；Windows/Docker Desktop 的 bind mount 不跟踪属主，看不出差别。
 
 ## 访问宿主上的服务
 
