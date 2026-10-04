@@ -18,12 +18,10 @@
 # The project is bind-mounted at runtime; install its dependencies yourself from
 # inside the container with "yarn install" when you need them.
 #
-# Change the dsh version by editing ARG DSH_VERSION below, or with
-# docker build --build-arg DSH_VERSION=<version|dist-tag>.
+# The dsh version is pinned in the npm install line below (the only place it is
+# specified - there is no build arg and no entry in .env or docker-compose.yml).
 # =============================================================================
 FROM node:24-bookworm-slim
-
-ARG DSH_VERSION=0.2.0-rc.2
 
 ENV DEBIAN_FRONTEND=noninteractive \
     DSH_HOME=/home/dsh/.dsh \
@@ -57,9 +55,10 @@ RUN set -eux; \
     rm -rf /var/lib/apt/lists/*
 
 # Install the dsh CLI (global, so "dsh" works directly inside the container;
-# running it via npx @deepseek-ai/dsh is equally supported)
+# running it via npx @deepseek-ai/dsh is equally supported).
+# dsh version: pinned here, change it on this line only.
 RUN set -eux; \
-    npm install -g "@deepseek-ai/dsh@${DSH_VERSION}"; \
+    npm install -g "@deepseek-ai/dsh@0.2.0-rc.2"; \
     command -v dsh; \
     dsh --version
 

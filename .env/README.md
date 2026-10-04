@@ -83,7 +83,9 @@ services:
 docker compose --env-file "%~dp0.env" -f "%~dp0docker-compose.yml" build
 ```
 
-`%~dp0` 是 bat 所在目录（`.env\`），所以 compose 的 `context: ..` 解析到仓库根目录，`.dockerignore` 生效。改 dsh 版本就改 `Dockerfile` 里的 `ARG DSH_VERSION`（也可 `docker compose ... build --build-arg DSH_VERSION=...`）。
+`%~dp0` 是 bat 所在目录（`.env\`），所以 compose 的 `context: ..` 解析到仓库根目录，`.dockerignore` 生效。
+
+改 dsh 版本：只改 `Dockerfile` 里那一行 `npm install -g "@deepseek-ai/dsh@<版本>"`。版本**只在 Dockerfile 指定**——`.env`、`env.example`、`docker-compose.yml` 都没有它，也没有 build arg。
 
 ### docker-bash.bat / docker-dsh.bat
 

@@ -1,0 +1,5 @@
+# Line endings for this folder, independent of the host's core.autocrlf setting.
+# Working tree: *.bat must be CRLF (cmd.exe), *.sh must be LF (bash).
+# Git stores both normalized to LF in the repository; eol= controls the checkout.
+*.bat text eol=crlf
+*.sh  text eol=lf
