@@ -4,7 +4,7 @@
 
 组成就三样：**一个工具镜像 + 一层只负责「端口映射 / 挂载卷 / 环境变量」的 docker-compose + 几个一行的 bat**。compose 里**不写 `command:`**，容器永远以镜像默认的 `bash` 启动；真正的启动命令由 bat 在 `docker compose run ... dev <命令>` 里传进去（例如执行 `sh/` 下的脚本）。
 
-**镜像只提供工具和 DSH 环境，不碰项目**：不拷任何项目文件进镜像，构建时也不执行任何项目命令（没有 `yarn install`、没有 postinstall、没有 `wxt prepare`）。项目通过挂载进容器，依赖要你自己在容器里装。（镜像确实会预装 AgentTeams 插件，但那是装进 DSH 的 profile，跟项目无关 —— 见下面「镜像自带 AgentTeams 插件」。）
+**镜像只提供工具和 DSH 环境，不碰项目**：不拷任何项目文件进镜像，构建时也不执行任何项目命令（没有 `yarn install`、没有 postinstall、没有 `wxt prepare`）。项目通过挂载进容器，依赖要你自己在容器里装。（镜像确实会预装几个 DSH 插件，但那是装进 DSH 的 profile，跟项目无关 —— 见下面「镜像自带的 DSH 插件」。）
 
 ## 文件说明
 
@@ -55,14 +55,21 @@ yarn dev               # 启动 wxt 开发模式
 
 `yarn install` 会按项目 `package.json` 里锁定的 `packageManager: yarn@4.17.1` 自动取用对应 yarn，并触发项目自己的 postinstall（`wxt prepare`）——这些都是你主动在容器里执行的结果，不是镜像构建时跑掉的。
 
-## 镜像自带 AgentTeams 插件（关键机制）
+## 镜像自带的 DSH 插件（关键机制）
 
-镜像自带 [`@nanmicoder/dsh-agent-teams`](https://www.npmjs.com/package/@nanmicoder/dsh-agent-teams)（多智能体团队插件：captain + 成员 + 共享任务 DAG + Web 团队面板）。版本与 dsh 版本都只写在 `Dockerfile` 顶部：
+镜像自带 4 个第三方 DSH 插件，**按 `@latest` 安装**：
 
-```dockerfile
-ARG DSH_VERSION=0.2.0-rc.2
-ARG AGENT_TEAMS_VERSION=0.1.22
-```
+| 插件 | 作用 |
+|---|---|
+| `@nanmicoder/dsh-agent-teams` | 多智能体团队：captain + 成员 + 共享任务 DAG + Web 团队面板 |
+| `dsh-better-sidebar` | 更好的侧边栏（文件树等） |
+| `dsh-context` | 上下文洞察与管理 |
+| `dsh-whale-widget` | 右下角余额小挂件（纯客户端插件，无 host 配置行） |
+
+**版本策略：不钉版本，用 `@latest`。** 构建那一刻 registry 上的 latest 就是镜像里的版本。构建步骤会把每个包**当场解析出的真实版本**写进 `/opt/dsh-plugin/specs.env`，容器启动时据此逐包比对 —— 所以：
+
+- 重建镜像 → 自动带上当时的最新版；**不重建就不会偷偷升级**（不会每次开机去 re-resolve 标签，也就不会漂移、不需要联网）。
+- `DSH_VERSION`（harness 本体）仍然是钉住的 `ARG DSH_VERSION`，**它和插件不同**：harness 换版本必须重建镜像，插件则跟构建走。
 
 ### 为什么不能在构建时装进 `/root/.dsh`
 
@@ -77,21 +84,24 @@ ARG AGENT_TEAMS_VERSION=0.1.22
 
 行为细节：
 
-- **重复启动零成本**：先比对卷里已装版本与 `DSH_PLUGIN_VERSION`，相同就打印一行 `already installed` 直接跳过（实测 0.02 秒、不写盘、不联网）。
+- **重复启动零成本**：逐个比对 `DSH_PLUGIN_SPECS` 里每个包的已装版本，全部一致就打印 `all pinned plugins match this image` 直接跳过（实测 0.04 秒、不写盘、不联网）；只有版本不同或缺失的包会被装（多个包合并成一次 `dsh plugin add`）。
 - **离线优先**：需要安装时先试 `--offline`（用镜像预热的 store，实测约 1 秒、无 registry 流量），打不中才回退联网。
 - **装不上也能启动**：安装失败只警告，容器照常起来 —— 卷里有旧版就用旧版，没有就不挂插件。DSH 自己的兼容闸门（插件 peer 与 dsh 版本不匹配）也会在这条路径上拦截，实测会保留卷里已有的版本。
-- **补丁层按内容挂载**：`cordis.patch.yml` 与镜像那份不同才覆盖，所以改 Dockerfile 里的配置、重建镜像后，下次启动生效。
+- **补丁层只播种一次，之后不覆盖**：现场 `cordis.patch.yml` 里的行是权威的。启动时逐行检查镜像声明的每个 `id` 是否已存在：全都在 → 什么都不做（你自己的设置、GUI 重新格式化的 YAML、以及其他插件追加的行都会保留）；镜像有新增行而现场没有 → **只警告、不写入**，除非显式 `DSH_PLUGIN_FORCE_PATCH=1`。只有现场文件不存在、或内容是空的 `[]`/纯注释时才从镜像播种。
+  > 为什么要这样：Web UI 的设置面板会把改动写回这个文件（原子写、mode 0600），并**重写整个文档**。任何字节比较都会把"你改过设置"误判成"镜像需要更新"，从而静默丢掉你的设置。按行 id 判定 + 只播种，是这个冲突的最小安全解。
 - **不碰别的**：凭据、`settings.yaml`、会话记录都在卷里，脚本只写 `profiles/<name>/` 下的插件与 `cordis.patch.yml`。
 
 ### 相关环境变量（镜像里已设默认值）
 
 | 变量 | 默认 | 作用 |
 |---|---|---|
-| `DSH_PLUGIN_VERSION` | 由 `ARG AGENT_TEAMS_VERSION` 生成 | 要装的插件版本，也是幂等判断依据 |
+| `DSH_PLUGIN_SPECS` | 由构建期解析 `@latest` 得到，写在 `/opt/dsh-plugin/specs.env` | 要装的插件清单（`名称@版本`，空格分隔），也是幂等判断依据；显式设置可覆盖 |
+| `DSH_PLUGIN_PACKAGE` | 空 | 一次性覆盖：设了就只用这一个 spec，替代整份清单 |
 | `DSH_PLUGIN_PACKAGE` | `@nanmicoder/dsh-agent-teams` | 要装的包名 |
 | `DSH_PLUGIN_PATCH` | `/opt/dsh-plugin/cordis.patch.yml` | 要挂进 profile 的补丁层 |
 | `DSH_SEED_PROFILES` | `web` | 要 provision 的 profile |
 | `DSH_PLUGIN_REFRESH` | 空 | 设 `1` 强制重装（即使版本相同） |
+| `DSH_PLUGIN_FORCE_PATCH` | 空 | 设 `1` 允许镜像覆盖现场已有的 `cordis.patch.yml`（默认不覆盖，只警告） |
 | `DSH_PLUGIN_TIMEOUT` | `600` | 单次安装的超时秒数 |
 
 ### 镜像里给插件写了什么默认值
@@ -108,8 +118,9 @@ ARG AGENT_TEAMS_VERSION=0.1.22
 
 | 想做的事 | 改哪里 |
 |---|---|
-| 升级插件版本 | 改 `Dockerfile` 的 `ARG AGENT_TEAMS_VERSION`，重建镜像；下次启动自动装新版（旧版还在时先试离线，装不上就继续用旧版） |
-| 改插件配置 / 团队模板 | 改 `Dockerfile` 里 heredoc 那段，重建镜像；下次启动按内容差异覆盖 |
+| 升级插件 | **直接重建镜像**（`@latest` 会取当时最新）；下次启动自动装新版，先试离线、未命中才联网，装不上就继续用卷里的旧版 |
+| 加一个新插件 | 在 `Dockerfile` 构建步骤的 `dsh plugin add` 里加 `"<包名>@latest"`，并把包名加进同一段里的 `for name in ...` 列表（它决定写进 `specs.env` 的版本） |
+| 改插件配置 / 团队模板 | 改 `Dockerfile` 里 heredoc 那段并重建镜像；**但如果现场文件里已有该行，启动时不会覆盖**（会警告）。要强制应用：容器里跑 `DSH_PLUGIN_FORCE_PATCH=1 sh /usr/local/bin/dsh-profile-provision.sh web`，或删掉现场的 `cordis.patch.yml` 让镜像重新播种 |
 | 只想在这一次容器里加插件 | 容器里直接 `dsh plugin --profile web add ...`，留在卷里，重启仍在（不受本机制影响） |
 | 怀疑状态不对 | `DSH_PLUGIN_REFRESH=1 docker compose ... run --rm dev bash` 强制重装 |
 
@@ -171,7 +182,7 @@ docker compose --env-file "%~dp0.env" -f "%~dp0docker-compose.yml" build
 
 `%~dp0` 是 bat 所在目录（`.env\`），所以 compose 的 `context: ..` 解析到仓库根目录，`.dockerignore` 生效。
 
-改 dsh 版本：改 `Dockerfile` 顶部的 `ARG DSH_VERSION=<版本>`（唯一指定处）。插件版本在它下面的 `ARG AGENT_TEAMS_VERSION`，两者要满足插件的兼容矩阵。`.env`、`env.example`、`docker-compose.yml` 都没有版本号，也不是 build arg。
+改 dsh 版本：改 `Dockerfile` 顶部的 `ARG DSH_VERSION=<版本>`（唯一指定处）。插件版本在它下面，一个包一行 `ARG *_VERSION`；两者要满足插件的兼容矩阵（安装器的门禁只看插件的 `@deepseek-ai/dsh*` peerDependencies）。`.env`、`env.example`、`docker-compose.yml` 都没有版本号，也不是 build arg。
 
 ### docker-bash.bat / docker-dsh.bat
 
@@ -189,7 +200,7 @@ docker compose run --rm --service-ports dev bash /workspace/.env/sh/dsh.sh
 
 | 会留下 | 内容 | 怎么删 |
 |---|---|---|
-| 卷 `dsh-dev_dsh-home` | 登录凭据、`settings.yaml`、会话记录，以及 profile（含装好的 AgentTeams 插件，所以重启不必重装；镜像换了插件版本才需要再装一次） | `docker volume rm dsh-dev_dsh-home` |
+| 卷 `dsh-dev_dsh-home` | 登录凭据、`settings.yaml`、会话记录，以及 profile（含装好的 4 个插件，所以重启不必重装；镜像换了插件版本才需要再装一次） | `docker volume rm dsh-dev_dsh-home` |
 | 卷 `dsh-dev_dsh-node-modules` | 容器里 `yarn install` 装出的依赖 | `docker volume rm dsh-dev_dsh-node-modules` |
 | 镜像 `dsh-dev:local` | 构建产物 | `docker image rm dsh-dev:local` |
 
