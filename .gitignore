@@ -1,3 +1,6 @@
+# Host-side variable file for the DSH container dev environment (may hold API keys)
+.env/.env
+
 # Logs
 logs
 *.log
@@ -13,6 +16,9 @@ stats.html
 stats-*.json
 .wxt
 web-ext.config.ts
+
+# Harness eval run artifacts (regenerate with `bash scripts/eval.sh`)
+.eval/results/
 
 # Editor directories and files
 .vscode/*

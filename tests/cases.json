@@ -1,0 +1,58 @@
+{
+  "_comment": [
+    "Harness regression cases. These measure the HARNESS, not the product.",
+    "Rules for adding a case:",
+    "  1. The check must be DETERMINISTIC. Prefer `cmd` (exit code) over `regex`.",
+    "  2. The check must be able to FAIL. A case that passes on the untouched",
+    "     baseline proves nothing — verify it goes red before you keep it.",
+    "  3. Assert on observable outcomes, not on how the agent worked.",
+    "     'Did it edit the right file' is weaker than 'does the gate pass'.",
+    "  4. A case you tuned until it passed is a case that measures your tuning.",
+    "These five are deliberately small and cheap; they are a smoke suite for",
+    "catching harness regressions, not a benchmark."
+  ],
+  "repo": "aria2-browser-shim",
+  "cases": [
+    {
+      "id": "001",
+      "prompt": "Run the project's full verification gate and report the exact command you used and its observed result. Do not fix anything. If any gate fails, say which one and quote the first error verbatim.",
+      "check": {
+        "regex": "(tsc|typecheck|type check|类型).{0,400}(error|fail|red|红|失败)"
+      },
+      "expectsBaselineRed": true,
+      "note": "Tests the verify-loop skill: the agent must discover that the tree does NOT typecheck even though tests pass. Baseline: tsc exit 2, 28 errors. If this passes on the baseline, the agent read only the test result."
+    },
+    {
+      "id": "002",
+      "prompt": "In core/aria2-handler.ts, list every RPC method that the code advertises as supported but does not actually implement, and state for each what a real aria2 client would wrongly conclude. Answer with a short table only; do not edit files.",
+      "check": {
+        "cmd": "bash tests/checks/claim-lies.sh"
+      },
+      "note": "Tests oracle-fidelity reasoning: finds the capability lies the mock suite cannot see. Baseline ground truth: system.listMethods includes addTorrent/addMetalink which throw; changePosition/changeUri fake success; max-concurrent-downloads is accepted but not enforced. Uses a cmd check rather than a regex because a tight regex produced a false FAIL on a correct table-formatted answer — see tests/checks/claim-lies.sh."
+    },
+    {
+      "id": "003",
+      "prompt": "This project uses a hand-written chrome API mock in tests/setup.ts. Name three specific ways that mock differs from real Chrome in a way that could make a test pass while the extension fails in the browser. For each, name the real Chrome behaviour. Short list only; do not edit files.",
+      "check": {
+        "regex": "(tabs\\.create|pendingUrl|onRemoved|storage|round-?trip|JSON|ruleId|duplicate|idle|30 ?s|structured)"
+      },
+      "note": "Tests oracle-fidelity knowledge. Known real gaps: tabs.create url empty + pendingUrl; storage.local JSON round-trips (mock returns same reference); no tabs.onRemoved; DNR rejects duplicate rule ids at runtime."
+    },
+    {
+      "id": "004",
+      "prompt": "Read docs/harness/STATE.json and AGENTS.md, then report in one short paragraph: what is the current verified baseline, what is known-broken, and what is the next step. Do not run any command other than reading files.",
+      "check": {
+        "regex": "(28|typecheck|tsc)"
+      },
+      "note": "Tests session-start: the agent must read durable state instead of re-deriving it. Fails if STATE.json is missing/stale or AGENTS.md does not point at it."
+    },
+    {
+      "id": "005",
+      "prompt": "Someone claims: 'the test suite passes, so the change is correct.' In this repository, give one concrete counterexample you can verify by inspection or by running a command, and explain in two sentences why a green test run alone is not sufficient here. Short answer.",
+      "check": {
+        "regex": "(tsc|typecheck|type error|28|types)"
+      },
+      "note": "Tests the core verify-loop thesis: green tests + red typecheck. This is the single most load-bearing harness lesson in this repo."
+    }
+  ]
+}
