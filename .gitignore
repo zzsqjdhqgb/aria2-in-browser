@@ -31,3 +31,9 @@ web-ext.config.ts
 *.sln
 *.sw?
 repomix-output.xml
+
+# AgentTeams runtime state (roster, tasks, mailboxes): machine-local, not source
+.agent-teams/
+
+# DSH research output: notes, evidence dumps, catalog. Large and regenerable.
+.dsh-research/

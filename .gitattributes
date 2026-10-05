@@ -1,0 +1,10 @@
+# Line endings for this repository, independent of the host's core.autocrlf.
+# Git stores LF in the repository; eol=lf keeps the working tree LF too.
+#
+# Why it matters here: .gitignore arrived as CRLF in the working tree while the
+# repository holds LF, so every `git status` showed it as modified and a plain
+# `git add` would have rewritten all 33 lines instead of adding two. The
+# container's .env/.gitattributes already covered *.bat/*.sh the same way.
+.gitignore    text eol=lf
+.gitattributes text eol=lf
+*.sh          text eol=lf
