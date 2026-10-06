@@ -17,59 +17,18 @@
 | `docker-dsh.bat` | 同上再加 `--service-ports`，启动 `sh/dsh.sh`（socat + dsh web），宿主访问 `http://localhost:3080` |
 | `docker-attach.bat` | 连进**唯一**在运行的容器；0 个或多个都报错退出 |
 | `sh/dsh.sh` | 容器内启动脚本（socat + dsh web）。其他启动方式照此新增 |
+| `sh/dsh-entrypoint.sh` | 镜像的 `ENTRYPOINT`：读 `specs.env` → 调 provision → `exec "$@"`。可单独 `bash -n` / 直接跑 |
+| `sh/dsh-profile-provision.sh` | 启动时把插件装进 `$DSH_HOME`，并挂载镜像的 `cordis.patch.yml`。可单独跑（传 profile 名） |
 | `.env` / `env.example` | 变量文件，供 compose 插值与注入 |
 | `.gitignore` | 忽略宿主侧 `.env/.env` |
 
-镜像的 `ENTRYPOINT` 与插件 provision 脚本（`dsh-entrypoint.sh`、`dsh-profile-provision.sh`）**不存在于本目录**：它们由 `Dockerfile` 用自己的 heredoc 直接写进 `/usr/local/bin/`，`Dockerfile` 是唯一真相。
+这两个脚本在 `sh/` 下是**独立文件**，由 `Dockerfile` 的 `COPY` 放进 `/usr/local/bin/`：
 
-仓库根目录另有一份 `.dockerignore`（只用于缩小构建上下文）。
-
-## 编码与换行约定
-
-- `Dockerfile`、`*.bat`、`docker-compose.yml`、`.env`、`env.example` 一律**纯 ASCII**。bat 由 cmd.exe 按控制台代码页读取，UTF-8 中文会变乱码并可能破坏解析；`.env` 由 compose 读取，也保持 ASCII 最稳。
-- `*.bat` 用 **CRLF**；`sh/*.sh` 用 **LF**（bash 遇到行尾的 `\r` 会报 `command not found`）。
-- 本 `README.md` 是唯一例外：给人看的文档，中文无妨。
-
-## 快速开始
-
-Docker Desktop 需要处于运行状态。在**仓库根目录**的 cmd 里执行（bat 也能直接双击）：
-
-```bat
-rem 1) 构建镜像（首次拉取 node:24-bookworm-slim 并装 dsh / pnpm / yarn，需要几分钟）
-.env\docker-build.bat
-
-rem 2) 进容器（前台 bash；退出即销毁容器，两个数据卷保留）
-.env\docker-bash.bat
+```dockerfile
+COPY .env/sh/dsh-entrypoint.sh .env/sh/dsh-profile-provision.sh /usr/local/bin/
 ```
 
-`.env\.env` 已存在并有默认值，需要时直接改它（`DSH_WEB_PORT`、`TZ`、API key）。想恢复默认就从 `env.example` 复制一份。
-
-进入容器后，**第一次要先装依赖**（镜像里没有）：
-
-```bash
-dsh --version          # 应输出版本号
-yarn install           # 首次必做；结果落在 dsh-node-modules 卷里，不写宿主
-yarn test              # 跑项目测试
-yarn dev               # 启动 wxt 开发模式
-```
-
-`yarn install` 会按项目 `package.json` 里锁定的 `packageManager: yarn@4.17.1` 自动取用对应 yarn，并触发项目自己的 postinstall（`wxt prepare`）——这些都是你主动在容器里执行的结果，不是镜像构建时跑掉的。
-
-## 镜像自带的 DSH 插件（关键机制）
-
-镜像自带 4 个第三方 DSH 插件，**按 `@latest` 安装**：
-
-| 插件 | 作用 |
-|---|---|
-| `@nanmicoder/dsh-agent-teams` | 多智能体团队：captain + 成员 + 共享任务 DAG + Web 团队面板 |
-| `dsh-better-sidebar` | 更好的侧边栏（文件树等） |
-| `dsh-context` | 上下文洞察与管理 |
-| `dsh-whale-widget` | 右下角余额小挂件（纯客户端插件，无 host 配置行） |
-
-**版本策略：不钉版本，用 `@latest`。** 构建那一刻 registry 上的 latest 就是镜像里的版本。构建步骤会把每个包**当场解析出的真实版本**写进 `/opt/dsh-plugin/specs.env`，容器启动时据此逐包比对 —— 所以：
-
-- 重建镜像 → 自动带上当时的最新版；**不重建就不会偷偷升级**（不会每次开机去 re-resolve 标签，也就不会漂移、不需要联网）。
-- `DSH_VERSION`（harness 本体）仍然是钉住的 `ARG DSH_VERSION`，**它和插件不同**：harness 换版本必须重建镜像，插件则跟构建走。
+> ⚠️ **路径前缀 `.env/` 不能省。** `compose` 的 `context: ..` 让**构建上下文根 = 仓库根**，所以 `COPY` 的源路径是相对仓库根、不是相对这个 `Dockerfile` 所在的 `..env/` 目录。写成 `sh/dsh-entrypoint.sh` 会去找 `<repo>/sh/…`（不存在），报 `"/sh/dsh-entrypoint.sh": not found` —— 而文件其实在 `<repo>/.env/sh/` 下。
 
 ### 为什么不能在构建时装进 `/root/.dsh`
 
@@ -80,7 +39,7 @@ yarn dev               # 启动 wxt 开发模式
 1. **构建**：把 `DSH_HOME` 重定向到 `/opt/dsh-plugin`，跑一次官方命令 `dsh plugin --profile web add --save-exact @nanmicoder/dsh-agent-teams@<版本>`，然后**把这个临时 profile 删掉**。留下的只有两样东西：`/opt/dsh-plugin/cordis.patch.yml`（镜像的插件配置）和 `/root/.local/share/pnpm/store` 里被预热的 tarball（在镜像内，不在任何卷上）。
 2. **启动**：容器的 `ENTRYPOINT` → provision 脚本，在**卷已挂载之后**对 `$DSH_HOME` 跑同一个官方命令。所以结果和你在容器里手敲一遍完全一样，并且**留在卷里**；之后才 `exec "$@"` 执行原命令（`bash`、`sh/dsh.sh` 都不受影响）。
 
-> 这两个脚本**由 `Dockerfile` 用自己的 heredoc 写进镜像**，不是 `COPY` 进上下文的：构建上下文是整个仓库、而 `.env/` 是其中的点目录，在 Windows 主机上曾出现上下文遍历没把 `.env/sh/` 下新增文件交给 BuildKit（`COPY` 报 `sh/... : not found`）。改成内嵌后，镜像不再依赖"上下文里有没有这些文件"，`Dockerfile` 是这两个脚本的唯一真相。要单独测试它们，从 `Dockerfile` 里提取（`cat > /usr/local/bin/<名字> <<'SH'` 到单独的 `SH` 行之间就是脚本全文）。
+> **脚本改动只需重启容器，不必重建镜像**（它们是挂载进去的）。注意 `../.env/sh` 是宿主目录的绑定挂载，所以你在宿主机改 `.env/sh/*.sh` 后重启容器即生效；`sh/dsh.sh` 仍按原方式用 `bash /workspace/.env/sh/dsh.sh` 调用（走仓库挂载，与这条无关）。
 
 行为细节：
 
