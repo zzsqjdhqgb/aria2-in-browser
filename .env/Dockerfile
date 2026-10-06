@@ -14,7 +14,9 @@
 #   - dsh CLI        -> npm package @deepseek-ai/dsh, bin name "dsh"
 #   - dev toolchain  -> git / ripgrep / python3 / make / g++ for the agent and node-gyp
 #   - pnpm + yarn 4  -> dsh plugin management and this project (yarn@4.17.1)
-#   - an AgentTeams-ready web profile -> seeded into $DSH_HOME at start, see below
+#   - two scripts    -> the entrypoint and the plugin provisioner (see below);
+#                       the provisioner owns the plugin list, so this image
+#                       names no plugin and needs no rebuild to change one
 #
 # The project is bind-mounted at runtime; install its dependencies yourself from
 # inside the container with "yarn install" when you need them.
@@ -29,26 +31,23 @@
 #   the image's ENTRYPOINT (dsh-entrypoint.sh) calls dsh-profile-provision.sh,
 #   which runs the official "dsh plugin --profile web add" into $DSH_HOME. The
 #   result persists in the volume exactly like a manual install would.
-#   Both scripts are written further down in this file, not COPYed.
+#   Both scripts live in .env/sh/ and are COPYed in at the end of this file.
 #
-#   Restarts do no work: the provisioner compares the installed version with
-#   DSH_PLUGIN_SPECS and stops when they match. On a new version, or with
-#   DSH_PLUGIN_REFRESH=1, it installs -- offline first, because the build below
-#   primes the pnpm store inside the image, then online. A failed install only
-#   warns: the container still starts, with the volume's existing version.
-#
-#   The build still installs the plugin once, into a throwaway home: that pins
-#   the dependency resolution, proves the pinned pair is installable, and warms
-#   /root/.local/share/pnpm/store so the container's first start needs no
-#   downloads.
+#   Restarts are NOT free, deliberately: dsh-profile-provision.sh installs its
+#   own plugin list -- whose entries end in @latest -- at every container start,
+#   so the profile tracks whatever was published since the last start. That list
+#   lives in the script, which is bind-mounted: editing it costs a container
+#   restart, not a rebuild, and this image knows no plugin name at all. A failed
+#   install only warns: the container still starts, with whatever the volume
+#   already has.
 #
 # Runs as ROOT (uid 0) on purpose: there is no USER line, and both HOME and
 # DSH_HOME live under /root. On a Linux host the files the container creates are
 # therefore root-owned; on Windows/Docker Desktop the bind mount does not track
 # ownership anyway.
 #
-# The dsh and plugin versions are pinned in the ARG block right below FROM (the
-# only place either is specified).
+# The dsh version is pinned in the ARG block right below FROM (the only place it
+# is specified); plugin versions are not pinned anywhere.
 # =============================================================================
 FROM node:24-bookworm-slim
 
@@ -120,48 +119,28 @@ RUN printf 'globalFolder: /root/.yarn/global\nenableTelemetry: false\n' > /root/
 # Pre-create the directories that named volumes are mounted on: a volume inherits
 # the directory and its ownership from the image on first creation.
 #
-# These ENV values are the whole image -> container contract; the provisioner
-# reads them at start and has no other source of truth:
-#   DSH_PLUGIN_SPECS    whitespace-separated `name@version` list, normally NOT
-#                       set here: the build writes /opt/dsh-plugin/specs.env
-#                       with whatever @latest resolved to, and the entrypoint
-#                       loads it. Setting it explicitly overrides that.
-#   DSH_PLUGIN_PACKAGE  optional single-spec override, for one-off installs.
-#   DSH_PLUGIN_PATCH    the profile patch layer it applies when content differs.
-#   DSH_SEED_PROFILES   which profile to provision (docker-*.bat use web).
-# DSH_PLUGIN_HOME is build-only: the directory the scratch install below runs
-# under, so it never touches /root/.dsh. It is deliberately not part of the
-# runtime contract -- the provisioner works on $DSH_HOME only.
-ENV DSH_PLUGIN_HOME=/opt/dsh-plugin \
-    DSH_PLUGIN_PATCH=/opt/dsh-plugin/cordis.patch.yml \
+# The plugin list is NOT here: dsh-profile-provision.sh owns it, because that
+# script is bind-mounted and can be edited by restarting the container. This
+# image only carries what the plugins must be configured with -- the patch layer
+# below -- and the two scripts that do the work.
+#
+# DSH_PLUGIN_PATCH    the profile patch layer the provisioner seeds into the volume.
+# DSH_SEED_PROFILES   which profile to provision (docker-*.bat use web).
+ENV DSH_PLUGIN_PATCH=/opt/dsh-plugin/cordis.patch.yml \
     DSH_SEED_PROFILES=web
 RUN mkdir -p /root/.dsh/profiles /opt/dsh-plugin /root/.yarn/global /workspace
 
-# Prime the plugins into the image, then hand the container only its config:
-#   * DSH_HOME points at DSH_PLUGIN_HOME for this RUN only, so this scratch
-#     install never lands in /root/.dsh -- which the dsh-home volume hides at
-#     runtime, the trap this whole design avoids.
-#   * No profile exists yet, so "dsh plugin" first initializes the shipped web
-#     template (dsh-base + dsh-web-app) and then installs each plugin @latest --
-#     so a rebuild picks up whatever is newest at that moment, which is the
-#     intended semantics: not a version pinned in this file, but "latest as of
-#     the build". The resolved versions are written to specs.env so the
-#     container installs exactly those, instead of re-resolving the tag at
-#     every start (which would drift and need the network).
-#   * The scratch profile is deleted again on purpose: the image ships the
-#     plugins' TARBALLS, warmed into /root/.local/share/pnpm/store (outside
-#     every volume), not an installed profile. The container's install is then
-#     an offline link step, and the volume keeps ownership of its profile.
-#   * cordis.patch.yml is the image's profile configuration, mounted into the
-#     volume by the provisioner: a 16-member roster cap, and reusable team
-#     layouts any session starts with "/agent-teams --profile <name> <goal>".
-#     Members inherit the captain's own model route, so no model is pinned.
-RUN set -eux; \
-    DSH_HOME="${DSH_PLUGIN_HOME}" dsh plugin --profile web add \
-        "@nanmicoder/dsh-agent-teams@latest" "dsh-better-sidebar@latest" \
-        "dsh-context@latest" "dsh-whale-widget@latest"; \
-    test -d "${DSH_PLUGIN_HOME}/profiles/web/node_modules"; \
-    cat > "${DSH_PLUGIN_PATCH}" <<'YAML'
+# The image's profile configuration, mounted into the volume by the provisioner:
+# a 16-member roster cap, and reusable team layouts any session starts with
+# "/agent-teams --profile <name> <goal>". Members inherit the captain's own model
+# route, so no model is pinned. dsh-boot-animation needs no row here: its own
+# package manifest declares dsh.bundle.patch, which "dsh plugin add" reconciles
+# into the profile's bundle list on install.
+#
+# Its own RUN, containing nothing but the heredoc: when this logic shared a RUN
+# with other commands, the Docker parser never found the heredoc and read the
+# YAML as instructions ("unknown instruction: -").
+RUN cat > "${DSH_PLUGIN_PATCH}" <<'YAML'
 # Profile patch layer for the container's web profile, mounted into the volume
 # by dsh-profile-provision.sh. Owned by .env/Dockerfile: change it here
 # and rebuild, rather than editing the copy inside a running container (a
@@ -225,36 +204,6 @@ RUN set -eux; \
             assignee: risk-reader
 YAML
 
-# Record what @latest resolved to at build time, so the container installs
-# exactly those versions instead of re-resolving the tag on every start.
-#
-# Deliberately its own RUN, and deliberately free of escaped quotes and quoted
-# backslashes: when this logic sat on the RUN that also wrote the cordis.patch.yml
-# heredoc, the Docker parser never found the heredoc and read the YAML as
-# instructions ("unknown instruction: -"). Keeping the two apart means the YAML
-# is written by a RUN that contains nothing but simple commands.
-#
-# One node script does the whole job, so the Dockerfile opens exactly one
-# quoted string in the command substitution and nothing else. The plugin list
-# lives here: adding a plugin means one line here and one in the add above.
-RUN set -eux; \
-    node -e " \
-        const fs = require('fs'); \
-        const root = process.env.DSH_PLUGIN_HOME; \
-        const names = [ \
-            '@nanmicoder/dsh-agent-teams', \
-            'dsh-better-sidebar', \
-            'dsh-context', \
-            'dsh-whale-widget', \
-        ]; \
-        const specs = names.map((n) => n + '@' + JSON.parse(fs.readFileSync(root + '/profiles/web/node_modules/' + n + '/package.json', 'utf8')).version); \
-        fs.writeFileSync(root + '/specs.env', 'DSH_PLUGIN_SPECS=\'' + specs.join(' ') + '\'\\n'); \
-        console.log('dsh: resolved at build time: ' + specs.join(' ')); \
-    "; \
-    rm -rf "${DSH_PLUGIN_HOME}/profiles"; \
-    cat "${DSH_PLUGIN_HOME}/specs.env"
-
-
 # Trust the bind-mounted workspace for git. Running as root against a root-owned
 # mount already passes git's ownership check, so this is a no-op there; it keeps
 # git usable when the mount carries a different uid instead (Linux host, or a
@@ -266,14 +215,13 @@ RUN git config --system --add safe.directory /workspace
 WORKDIR /workspace
 
 # /opt/dsh-plugin holds only the image's profile configuration (the patch layer)
-# and the warmed pnpm store lives under /root -- both plain image content, since
-# nothing mounts over either path. Deliberately NOT a VOLUME or a compose mount:
-# a volume there would be initialized empty and shadow it, the way dsh-home
-# shadows everything under /root/.dsh.
+# -- plain image content, since nothing mounts over that path. Deliberately NOT a
+# VOLUME or a compose mount: a volume there would be initialized empty and shadow
+# it, the way dsh-home shadows everything under /root/.dsh.
 #
-# The entrypoint provisions $DSH_HOME's profile from the image, then execs the
-# requested command. With the default CMD that is bash; the docker-*.bat files
-# pass their own command after the image name, e.g.
+# The entrypoint provisions $DSH_HOME's profile, then execs the requested
+# command. With the default CMD that is bash; the docker-*.bat files pass their
+# own command after the image name, e.g.
 # "dsh-dev:local bash /workspace/.env/sh/dsh.sh".
 #
 # Both scripts live in .env/sh/ as ordinary files so they can be syntax-checked

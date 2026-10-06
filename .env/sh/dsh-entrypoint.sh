@@ -16,18 +16,10 @@
 set -euo pipefail
 
 here="$(dirname "$(readlink -f "$0")")"
-# The versions this image resolved from @latest at build time live next to the
-# patch layer. Pass them down explicitly: sourcing the file would only set a
-# shell variable here, and the provisioner runs as a child process. An explicit
-# DSH_PLUGIN_SPECS in the environment still wins.
-specs_env="${DSH_PLUGIN_HOME:-/opt/dsh-plugin}/specs.env"
-if [[ -z "${DSH_PLUGIN_SPECS:-}" && -r "${specs_env}" ]]; then
-    raw="$(sed -n 's/^DSH_PLUGIN_SPECS=//p' "${specs_env}" | head -1)"
-    # The file holds a shell assignment, so let the shell parse its value
-    # instead of stripping quotes by hand (it is written by this build).
-    eval "DSH_PLUGIN_SPECS=${raw}"
-    export DSH_PLUGIN_SPECS
-fi
+# DSH_PLUGIN_SPECS comes straight from the image's ENV (the one place the plugin
+# list lives -- see .env/Dockerfile), overridable per container through .env.
+# Nothing is read from a file: the list is installed again on every start, so
+# there is no resolved-version file to load.
 if [[ -x "$here/dsh-profile-provision.sh" ]]; then
     "$here/dsh-profile-provision.sh" "${DSH_SEED_PROFILES:-web}" || true
 else

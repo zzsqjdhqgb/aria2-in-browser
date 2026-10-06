@@ -17,8 +17,8 @@
 | `docker-dsh.bat` | 同上再加 `--service-ports`，启动 `sh/dsh.sh`（socat + dsh web），宿主访问 `http://localhost:3080` |
 | `docker-attach.bat` | 连进**唯一**在运行的容器；0 个或多个都报错退出 |
 | `sh/dsh.sh` | 容器内启动脚本（socat + dsh web）。其他启动方式照此新增 |
-| `sh/dsh-entrypoint.sh` | 镜像的 `ENTRYPOINT`：读 `specs.env` → 调 provision → `exec "$@"`。可单独 `bash -n` / 直接跑 |
-| `sh/dsh-profile-provision.sh` | 启动时把插件装进 `$DSH_HOME`，并挂载镜像的 `cordis.patch.yml`。可单独跑（传 profile 名） |
+| `sh/dsh-entrypoint.sh` | 镜像的 `ENTRYPOINT`：调 provision（清单来自镜像 ENV）→ `exec "$@"`。可单独 `bash -n` / 直接跑 |
+| `sh/dsh-profile-provision.sh` | **插件清单的唯一归属地**（顶部 `PLUGIN_SPECS`）；启动时把清单装进 `$DSH_HOME`，并挂载镜像的 `cordis.patch.yml`。可单独跑（传 profile 名） |
 | `.env` / `env.example` | 变量文件，供 compose 插值与注入 |
 | `.gitignore` | 忽略宿主侧 `.env/.env` |
 
@@ -34,32 +34,34 @@ COPY .env/sh/dsh-entrypoint.sh .env/sh/dsh-profile-provision.sh /usr/local/bin/
 
 `/root/.dsh` 是卷 `dsh-dev_dsh-home`。**卷只在第一次创建时从镜像复制内容，之后会把镜像里同一路径完全遮住**。所以 `docker build` 期间往 `/root/.dsh` 装插件，任何容器都看不到；重建镜像也永远更新不了已存在的卷。DSH 解析插件只有两个锚点（安装目录 + profile 目录），没有第三个可配置的插件位置，所以绕不过这件事。
 
-### 实际做法：构建只预热，安装发生在容器启动后
+### 实际做法：清单在 provision 脚本里，安装发生在容器启动后
 
-1. **构建**：把 `DSH_HOME` 重定向到 `/opt/dsh-plugin`，跑一次官方命令 `dsh plugin --profile web add --save-exact @nanmicoder/dsh-agent-teams@<版本>`，然后**把这个临时 profile 删掉**。留下的只有两样东西：`/opt/dsh-plugin/cordis.patch.yml`（镜像的插件配置）和 `/root/.local/share/pnpm/store` 里被预热的 tarball（在镜像内，不在任何卷上）。
-2. **启动**：容器的 `ENTRYPOINT` → provision 脚本，在**卷已挂载之后**对 `$DSH_HOME` 跑同一个官方命令。所以结果和你在容器里手敲一遍完全一样，并且**留在卷里**；之后才 `exec "$@"` 执行原命令（`bash`、`sh/dsh.sh` 都不受影响）。
+1. **构建**：跟插件无关。镜像不带任何插件名、也不预热任何 tarball；它只带两样东西：`/opt/dsh-plugin/cordis.patch.yml`（插件配置）和 `/usr/local/bin/` 下的两个脚本。
+2. **启动**：容器的 `ENTRYPOINT` → `dsh-profile-provision.sh`，在**卷已挂载之后**对 `$DSH_HOME` 跑官方命令 `dsh plugin --profile web add <它自己那份清单>`。结果和你在容器里手敲一遍完全一样，并且**留在卷里**；之后才 `exec "$@"` 执行原命令（`bash`、`sh/dsh.sh` 都不受影响）。
+
+**所以清单只有一处：`sh/dsh-profile-provision.sh` 顶部的 `PLUGIN_SPECS`。** 它在容器里是绑定挂载（`../.env/sh`），改完**重启容器**即可生效 —— 不用重建镜像，镜像也不因此变化。
 
 > **脚本改动只需重启容器，不必重建镜像**（它们是挂载进去的）。注意 `../.env/sh` 是宿主目录的绑定挂载，所以你在宿主机改 `.env/sh/*.sh` 后重启容器即生效；`sh/dsh.sh` 仍按原方式用 `bash /workspace/.env/sh/dsh.sh` 调用（走仓库挂载，与这条无关）。
 
 行为细节：
 
-- **重复启动零成本**：逐个比对 `DSH_PLUGIN_SPECS` 里每个包的已装版本，全部一致就打印 `all pinned plugins match this image` 直接跳过（实测 0.04 秒、不写盘、不联网）；只有版本不同或缺失的包会被装（多个包合并成一次 `dsh plugin add`）。
-- **离线优先**：需要安装时先试 `--offline`（用镜像预热的 store，实测约 1 秒、无 registry 流量），打不中才回退联网。
-- **装不上也能启动**：安装失败只警告，容器照常起来 —— 卷里有旧版就用旧版，没有就不挂插件。DSH 自己的兼容闸门（插件 peer 与 dsh 版本不匹配）也会在这条路径上拦截，实测会保留卷里已有的版本。
+- **每次启动都装一遍，不钉版本**：清单里写的是 `@latest`，所以每次容器启动都会重新解析一遍 registry；上一次之后发布的新版会在这次启动装上，不需要重建镜像，也没有版本号要维护。代价是每次启动都要联网解析：实测一次启动约 **8 秒**（registry 一批 0.03–1 秒；git 的 `add` 约 3 秒、`update` 约 3 秒）。
+- **两批安装**：registry 包一批、自带来源的包（git）一批，各自独立成败 —— github 不通不能让 registry 插件跟着装不上。
+- **git 包要多一步 `update`**：pnpm 的 git 依赖没有 `@latest` 语义，它在 lockfile 里把 ref 解析成 commit 之后就**锁住那个 commit**（实测连 `add --force` 也只会重下锁住的那个 commit）。所以 git 条目先 `add`（装上、或确认已在），再按包名 `update`，那才会重新解析 ref 拿到最新 commit。`pnpm add` 一次都不等于"回到最新"。
+- **联网优先、离线兜底**：要拿到 `@latest` 必须问 registry，所以先在线试；在线失败（比如没网）再用 `--offline` 对着卷里已有的 lockfile 收尾，容器照常起来用现有版本。
+- **装不上也能启动**：任何一步失败都只警告，容器照常起来 —— 卷里有旧版就用旧版。DSH 自己的兼容闸门（插件 peer 与 dsh 版本不匹配）也会在这条路径上拦截。
 - **补丁层只播种一次，之后不覆盖**：现场 `cordis.patch.yml` 里的行是权威的。启动时逐行检查镜像声明的每个 `id` 是否已存在：全都在 → 什么都不做（你自己的设置、GUI 重新格式化的 YAML、以及其他插件追加的行都会保留）；镜像有新增行而现场没有 → **只警告、不写入**，除非显式 `DSH_PLUGIN_FORCE_PATCH=1`。只有现场文件不存在、或内容是空的 `[]`/纯注释时才从镜像播种。
   > 为什么要这样：Web UI 的设置面板会把改动写回这个文件（原子写、mode 0600），并**重写整个文档**。任何字节比较都会把"你改过设置"误判成"镜像需要更新"，从而静默丢掉你的设置。按行 id 判定 + 只播种，是这个冲突的最小安全解。
-- **不碰别的**：凭据、`settings.yaml`、会话记录都在卷里，脚本只写 `profiles/<name>/` 下的插件与 `cordis.patch.yml`。
+- **pnpm store 也放进卷里**：脚本给每次 `dsh plugin` 调用都带 `--store-dir=$DSH_HOME/.pnpm-store`。不是洁癖：`/root/.local/share/pnpm/store`（pnpm 默认位置）在容器可写层里，`run --rm` 一删就没了，于是**每个新容器都会把几百 MB 的 tarball 重下一遍**（实测 `downloaded 171`）；放进卷里就只下一次 —— 空卷首次启动实测约 30 秒、store 约 310 MB，之后启动不再重下。
+- **不碰别的**：凭据、`settings.yaml`、会话记录都在卷里，脚本只写 `profiles/<name>/` 下的插件、`cordis.patch.yml` 与 `.pnpm-store/`。
 
 ### 相关环境变量（镜像里已设默认值）
 
 | 变量 | 默认 | 作用 |
 |---|---|---|
-| `DSH_PLUGIN_SPECS` | 由构建期解析 `@latest` 得到，写在 `/opt/dsh-plugin/specs.env` | 要装的插件清单（`名称@版本`，空格分隔），也是幂等判断依据；显式设置可覆盖 |
-| `DSH_PLUGIN_PACKAGE` | 空 | 一次性覆盖：设了就只用这一个 spec，替代整份清单 |
-| `DSH_PLUGIN_PACKAGE` | `@nanmicoder/dsh-agent-teams` | 要装的包名 |
+| `DSH_PLUGIN_SPECS` | 空（清单内置在 `sh/dsh-profile-provision.sh` 里） | 覆盖内置清单：设了就整份替换（空格分隔），容器启动时装的是它。`.env` 里设即可按容器覆盖，不必重建镜像 |
 | `DSH_PLUGIN_PATCH` | `/opt/dsh-plugin/cordis.patch.yml` | 要挂进 profile 的补丁层 |
 | `DSH_SEED_PROFILES` | `web` | 要 provision 的 profile |
-| `DSH_PLUGIN_REFRESH` | 空 | 设 `1` 强制重装（即使版本相同） |
 | `DSH_PLUGIN_FORCE_PATCH` | 空 | 设 `1` 允许镜像覆盖现场已有的 `cordis.patch.yml`（默认不覆盖，只警告） |
 | `DSH_PLUGIN_TIMEOUT` | `600` | 单次安装的超时秒数 |
 
@@ -77,20 +79,26 @@ COPY .env/sh/dsh-entrypoint.sh .env/sh/dsh-profile-provision.sh /usr/local/bin/
 
 | 想做的事 | 改哪里 |
 |---|---|
-| 升级插件 | **直接重建镜像**（`@latest` 会取当时最新）；下次启动自动装新版，先试离线、未命中才联网，装不上就继续用卷里的旧版 |
-| 加一个新插件 | 在 `Dockerfile` 构建步骤的 `dsh plugin add` 里加 `"<包名>@latest"`，并把包名加进同一段里的 `for name in ...` 列表（它决定写进 `specs.env` 的版本） |
+| 升级插件 | **什么都不用做**：每次容器启动都会重新解析 `@latest` / git 的 ref，拿到当时最新 |
+| 加一个新的 registry 插件 | 在 `sh/dsh-profile-provision.sh` 的 `PLUGIN_SPECS` 里加一条 `"<包名>@latest"`（就这一处），重启容器 |
+| 加一个新的 git 插件 | 同一个 `ENV` 里加一条 `github:<owner>/<repo>`（可带 `#分支`）——脚本按 `github:`/`git+`/`.git` 认出它，并自动用 `add` + `update` 两步装 |
+| 只想改这一次容器的插件集 | 在 `.env` 里加 `DSH_PLUGIN_SPECS=...`（compose 通过 `env_file` 注入，覆盖脚本里的内置清单），不用动脚本 |
 | 改插件配置 / 团队模板 | 改 `Dockerfile` 里 heredoc 那段并重建镜像；**但如果现场文件里已有该行，启动时不会覆盖**（会警告）。要强制应用：容器里跑 `DSH_PLUGIN_FORCE_PATCH=1 sh /usr/local/bin/dsh-profile-provision.sh web`，或删掉现场的 `cordis.patch.yml` 让镜像重新播种 |
-| 只想在这一次容器里加插件 | 容器里直接 `dsh plugin --profile web add ...`，留在卷里，重启仍在（不受本机制影响） |
-| 怀疑状态不对 | `DSH_PLUGIN_REFRESH=1 docker compose ... run --rm dev bash` 强制重装 |
+| 只想临时试一个插件 | 容器里直接 `dsh plugin --profile web add ...`，留在卷里，重启仍在；下次启动会被脚本清单再装一遍（两者共存，不冲突） |
+| 想钉住某个版本（不要 @latest） | 把清单里那一条改成 `<包名>@<版本>` 即可 —— 脚本对两种写法一视同仁，只是不再自动升级它 |
 
 验证（构建后、或进容器后）：
 
 ```bash
 dsh --profile web --dump-config | grep -A 6 "id: agent-teams"   # 应看到 maxMembers: 16 和两个 profiles
+dsh --profile web --dump-config | grep -A 1 "id: dsh-boot-animation"   # git 那个插件也应挂进组合树
 ls -l /root/.dsh/profiles/web/node_modules/@nanmicoder/          # 插件应已装进卷
+grep -o 'tar.gz/[0-9a-f]\{40\}' /root/.dsh/profiles/web/pnpm-lock.yaml | head -1   # git 插件当前锁到的 commit
 ```
 
 `--dump-config` 只能证明配置**组合结果**；`maxMembers` 在运行期解析进内存、没有对外读取接口，除非真去建一个超过上限的花名册，否则看不到它被触发的报错。
+
+`dsh-boot-animation` 是纯客户端视觉插件，装完还要**重启 dsh**（entrypoint 每次容器启动都会重启它），并且浏览器要按 **Ctrl+Shift+R** 硬刷新：DSH 给客户端 bundle 的响应带 `max-age=31536000, immutable`，普通 F5 会继续用旧副本，现象就是"装上了但没反应"。
 
 ## compose 负责什么
 
@@ -141,7 +149,7 @@ docker compose --env-file "%~dp0.env" -f "%~dp0docker-compose.yml" build
 
 `%~dp0` 是 bat 所在目录（`.env\`），所以 compose 的 `context: ..` 解析到仓库根目录，`.dockerignore` 生效。
 
-改 dsh 版本：改 `Dockerfile` 顶部的 `ARG DSH_VERSION=<版本>`（唯一指定处）。插件版本在它下面，一个包一行 `ARG *_VERSION`；两者要满足插件的兼容矩阵（安装器的门禁只看插件的 `@deepseek-ai/dsh*` peerDependencies）。`.env`、`env.example`、`docker-compose.yml` 都没有版本号，也不是 build arg。
+改 dsh 版本：改 `Dockerfile` 顶部的 `ARG DSH_VERSION=<版本>`（唯一指定处，改它才需要重建镜像）。**插件版本不钉**：清单在 `sh/dsh-profile-provision.sh` 里、以 `@latest` / git ref 为准，每次启动重新解析。dsh 与插件要满足插件的兼容矩阵（安装器的门禁只看插件的 `@deepseek-ai/dsh*` peerDependencies——`dsh-boot-animation` 干脆不声明这类 peer，所以不会被门禁跳过）。`.env`、`env.example`、`docker-compose.yml` 都没有版本号，也不是 build arg；要固定某次容器的插件集，在 `.env` 里覆盖 `DSH_PLUGIN_SPECS`。
 
 ### docker-bash.bat / docker-dsh.bat
 
@@ -159,7 +167,7 @@ docker compose run --rm --service-ports dev bash /workspace/.env/sh/dsh.sh
 
 | 会留下 | 内容 | 怎么删 |
 |---|---|---|
-| 卷 `dsh-dev_dsh-home` | 登录凭据、`settings.yaml`、会话记录，以及 profile（含装好的 4 个插件，所以重启不必重装；镜像换了插件版本才需要再装一次） | `docker volume rm dsh-dev_dsh-home` |
+| 卷 `dsh-dev_dsh-home` | 登录凭据、`settings.yaml`、会话记录，以及 profile（含装好的 5 个插件；每次容器启动都会重新解析一遍 `@latest`，所以插件升级不需要重建镜像） | `docker volume rm dsh-dev_dsh-home` |
 | 卷 `dsh-dev_dsh-node-modules` | 容器里 `yarn install` 装出的依赖 | `docker volume rm dsh-dev_dsh-node-modules` |
 | 镜像 `dsh-dev:local` | 构建产物 | `docker image rm dsh-dev:local` |
 
