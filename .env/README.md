@@ -67,9 +67,9 @@ COPY .env/sh/dsh-entrypoint.sh .env/sh/dsh-profile-provision.sh /usr/local/bin/
 
 ### 镜像里给插件写了什么默认值
 
-`cordis.patch.yml` 由 `Dockerfile` 的 heredoc 生成（**改它要改 Dockerfile，不要在容器里改——容器里改的会在下次启动被覆盖**）：
+`cordis.patch.yml` 由 `Dockerfile` 的 heredoc 生成，**首次播种**进容器；之后它是"镜像默认值 + Web UI 配置编辑器（用户改动）"共同所有的文件。供给脚本按**行**判断：镜像声明的每个 `id:` 在现场文件里都已存在时，现场文件原样保留，用户改动不会被覆盖（详见下面「怎么改」表）：
 
-- `maxMembers: 16` —— 花名册上限，插件默认 8。一个交付通常就要「实现者 + 验证者 + 审查者」，8 会卡住并行；空闲成员不发模型请求，所以上限本身不花 token。
+- `maxMembers: 40` —— 花名册上限，插件默认 8。一个交付通常就要「实现者 + 验证者 + 审查者」，8 会卡住并行；多角色研究（如 5+5+4+2+4+1）也远超 16。空闲成员不发模型请求，所以上限本身不花 token。
 - `profiles:` 两个开箱即用的团队模板，任何会话都能用 `/agent-teams --profile <名字> <目标>` 直接起：
   - `feature-delivery`：analyst → implementer →（verifier ∥ reviewer），需求→实现→验证→审查
   - `audit`：code-reader ∥ history-reader ∥ risk-reader，同一问题的三个独立视角
@@ -90,13 +90,13 @@ COPY .env/sh/dsh-entrypoint.sh .env/sh/dsh-profile-provision.sh /usr/local/bin/
 验证（构建后、或进容器后）：
 
 ```bash
-dsh --profile web --dump-config | grep -A 6 "id: agent-teams"   # 应看到 maxMembers: 16 和两个 profiles
+dsh --profile web --dump-config | grep -A 6 "id: agent-teams"   # 应看到 maxMembers: 40 和两个 profiles
 dsh --profile web --dump-config | grep -A 1 "id: dsh-boot-animation"   # git 那个插件也应挂进组合树
 ls -l /root/.dsh/profiles/web/node_modules/@nanmicoder/          # 插件应已装进卷
 grep -o 'tar.gz/[0-9a-f]\{40\}' /root/.dsh/profiles/web/pnpm-lock.yaml | head -1   # git 插件当前锁到的 commit
 ```
 
-`--dump-config` 只能证明配置**组合结果**；`maxMembers` 在运行期解析进内存、没有对外读取接口，除非真去建一个超过上限的花名册，否则看不到它被触发的报错。
+`--dump-config` 只能证明配置**组合结果**；`maxMembers` 在运行期解析进内存、没有对外读取接口，除非真去建一个超过上限的花名册，否则看不到它被触发的报错。**但改现场文件会热生效**：cordis 监听 `cordis.patch.yml`，改完不必重启 dsh 就能建出超过旧上限的花名册（16 → 40 已实测），且暂存中的团队计划不受重载影响。
 
 `dsh-boot-animation` 是纯客户端视觉插件，装完还要**重启 dsh**（entrypoint 每次容器启动都会重启它），并且浏览器要按 **Ctrl+Shift+R** 硬刷新：DSH 给客户端 bundle 的响应带 `max-age=31536000, immutable`，普通 F5 会继续用旧副本，现象就是"装上了但没反应"。
 

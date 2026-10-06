@@ -151,7 +151,7 @@ RUN cat > "${DSH_PLUGIN_PATCH}" <<'YAML'
     # Roster cap. The plugin defaults to 8; one delivery already needs an
     # implementer plus a verifier and a reviewer, so 8 strands parallel work.
     # Idle roster rows issue no model requests, so the cap itself is free.
-    maxMembers: 16
+    maxMembers: 40
     # Reusable team layouts: /agent-teams --profile feature-delivery <goal>
     profiles:
       feature-delivery:
